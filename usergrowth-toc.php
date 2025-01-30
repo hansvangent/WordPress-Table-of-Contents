@@ -32,7 +32,7 @@ class TableOfContents {
          * Apple Tree|Oranges|Yellow Bananas ignore headings that are exactly "Apple Tree", "Oranges" or "Yellow Bananas"
          * **/
         $this->excludeHeadings = ['Related posts'];
-        $this->prefix = 'toc';
+        $this->prefix = '';
         $this->showHierarchy = true;
         $this->enableNumbersList = false;
         $this->sectionBackground = '#ffffff';
@@ -46,6 +46,9 @@ class TableOfContents {
 
         // Add the schema filter
         add_filter('rank_math/json_ld', array($this, 'add_toc_schema'), 99, 2);
+
+        // Add the content filter for heading IDs
+        add_filter('the_content', [$this, 'addHeadingIds']);
     }
 
     public function add_toc_schema($data, $jsonld) {
@@ -65,31 +68,26 @@ class TableOfContents {
             return $data;
         }
 
-        // Initialize navigation elements array
-        $navigation_elements = [];
+        // Get current URL
         $current_url = get_permalink();
 
+        // Add each navigation element directly to @graph
         foreach ($matches as $match) {
             $level = intval($match[1]);
             $title = trim(strip_tags($match[2]));
-            $anchor = 'toc-' . sanitize_title($title);
+            $anchor = sanitize_title($title);
 
-            $navigation_elements[] = [
+            // Add each navigation element as a separate entity in @graph
+            if (!isset($data['@graph'])) {
+                $data['@graph'] = [];
+            }
+
+            $data['@graph'][] = [
                 '@type' => 'SiteNavigationElement',
                 '@id' => $current_url . '#' . $anchor,
                 'name' => $title,
                 'url' => $current_url . '#' . $anchor
             ];
-        }
-
-        // Add to the graph array
-        if (!isset($data['@graph'])) {
-            $data['@graph'] = [];
-        }
-
-        // Add navigation elements to the graph
-        foreach ($navigation_elements as $element) {
-            $data['@graph'][] = $element;
         }
 
         return $data;
@@ -101,13 +99,21 @@ class TableOfContents {
 
         // Updated regex pattern
         $pattern = '/<h([1-6])[^>]*?>(?:\s*<[^>]+>)*([^<]+)(?:<\/[^>]+>)*\s*<\/h\1>/i';
-        preg_match_all($pattern, $content, $matches, PREG_SET_ORDER);
+        if (!preg_match_all($pattern, $content, $matches, PREG_SET_ORDER)) {
+            return '';
+        }
 
         // Start TOC HTML
         $toc = '<div id="toc-main-wrapper" class="toc-container">';
         $toc .= '<div class="toc-header">';
         $toc .= '<h2 id="toc-main-heading">Table of Contents</h2>';
-        $toc .= '<div class="toc-toggle-btn" data-show-text="[show]" data-hide-text="[hide]">[hide]</div>';
+        $toc .= '<div class="' . $this->getPrefix('toggle-btn') . '" 
+            data-show-text="[show]" 
+            data-hide-text="[hide]" 
+            role="button" 
+            tabindex="0" 
+            aria-expanded="true"
+            aria-controls="' . $this->getPrefix('list') . '">[hide]</div>';
         $toc .= '</div>';
         $toc .= '<ul class="toc-list">';
 
@@ -117,7 +123,7 @@ class TableOfContents {
         foreach ($matches as $match) {
             $level = intval($match[1]);
             $title = trim(strip_tags($match[2]));
-            
+
             // Add heading exclusion logic
             $should_exclude = false;
             foreach ($this->excludeHeadings as $pattern) {
@@ -127,19 +133,19 @@ class TableOfContents {
                     ['.*', '|'],
                     '/^(' . preg_quote($pattern, '/') . ')$/i'
                 );
-                
+
                 if (preg_match($regex_pattern, $title)) {
                     $should_exclude = true;
                     break;
                 }
             }
-            
+
             // Skip this heading if it should be excluded
             if ($should_exclude) {
                 continue;
             }
 
-            $anchor = 'toc-' . sanitize_title($title);
+            $anchor = sanitize_title($title);
 
             // Handle nesting
             if ($level > $current_level) {
@@ -284,6 +290,13 @@ class TableOfContents {
             .<?php echo $this->prefix; ?>-level-2 a {
                 font-weight: 500;
             }
+
+            @media screen and (max-width: 767px) {
+                #<?php echo $this->getPrefix('main-wrapper'); ?> {
+                    width: 95%;
+                    padding: 8px;
+                }
+            }
         </style>
         <?php
     }
@@ -291,78 +304,83 @@ class TableOfContents {
     public function addScripts() {
         ?>
         <script>
+            // Define slide functions in global scope
+            function <?php echo $this->prefix ? $this->prefix . 'slideUp' : 'slideUp' ?>(element, duration = 300) {
+                element.style.transition = `height ${duration}ms ease-out`;
+                element.style.overflow = 'hidden';
+                element.style.height = `${element.scrollHeight}px`;
+                requestAnimationFrame(() => {
+                    element.style.height = '0';
+                });
+                setTimeout(() => {
+                    element.style.display = 'none';
+                    element.style.height = null;
+                }, duration);
+            }
+
+            function <?php echo $this->prefix ? $this->prefix . 'slideDown' : 'slideDown' ?>(element, duration = 300) {
+                element.style.display = 'block';
+                const height = element.scrollHeight;
+                element.style.height = '0';
+                element.style.overflow = 'hidden';
+                requestAnimationFrame(() => {
+                    element.style.transition = `height ${duration}ms ease-out`;
+                    element.style.height = `${height}px`;
+                });
+                setTimeout(() => {
+                    element.style.height = null;
+                }, duration);
+            }
+
             document.addEventListener("DOMContentLoaded", function () {
                 const prefix = '<?php echo $this->prefix; ?>';
-                const tocLinks = document.querySelectorAll(`#${prefix}-main-wrapper a`);
-                const toggleBtn = document.querySelector(`.${prefix}-toggle-btn`);
-                const headings = document.querySelectorAll("h1, h2, h3, h4, h5, h6");
-                const smoothScrollOffset = <?php echo $this->smoothScrollOffset; ?>;
-
-                // Assign IDs to headings dynamically
-                headings.forEach((heading) => {
-                    if (!heading.id) {
-                        const text = heading.textContent.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\-]/g, '');
-                        heading.id = `${prefix}-${text}`;
-                    }
-                });
-
-                // Smooth scrolling
-                if (<?php echo $this->enableSmoothScroll ? 'true' : 'false'; ?>) {
-                    tocLinks.forEach(link => {
-                        link.addEventListener("click", function (e) {
-                            e.preventDefault();
-                            const targetId = this.getAttribute("href").substring(1);
-                            const targetElement = document.getElementById(targetId);
-
-                            if (targetElement) {
-                                const offsetTop = targetElement.getBoundingClientRect().top + window.scrollY - smoothScrollOffset;
-                                window.scrollTo({ top: offsetTop, behavior: "smooth" });
+                const toggleBtn = document.querySelector(prefix ? `.${prefix}-toggle-btn` : '.toggle-btn');
+                
+                if (toggleBtn) {
+                    toggleBtn.addEventListener("click", function () {
+                        const tocContainer = document.querySelector(prefix ? `ul.${prefix}-list` : 'ul.toc-list');
+                        if (tocContainer) {
+                            if (tocContainer.style.display === "none" || tocContainer.offsetHeight === 0) {
+                                this.textContent = this.getAttribute("data-hide-text");
+                                if (prefix) {
+                                    window[`${prefix}slideDown`](tocContainer, 300);
+                                } else {
+                                    slideDown(tocContainer, 300);
+                                }
+                            } else {
+                                if (prefix) {
+                                    window[`${prefix}slideUp`](tocContainer, 300);
+                                } else {
+                                    slideUp(tocContainer, 300);
+                                }
+                                this.textContent = this.getAttribute("data-show-text");
                             }
-                        });
+                        }
                     });
                 }
-
-                function <?php echo $this->prefix; ?>slideUp(element, duration = 300) {
-                    element.style.transition = `height ${duration}ms ease-out`;
-                    element.style.overflow = 'hidden';
-                    element.style.height = `${element.scrollHeight}px`;
-                    requestAnimationFrame(() => {
-                        element.style.height = '0';
-                    });
-                    setTimeout(() => {
-                        element.style.display = 'none';
-                        element.style.height = null; // Clear inline styles
-                    }, duration);
-                }
-
-                function <?php echo $this->prefix; ?>slideDown(element, duration = 300) {
-                    element.style.display = 'block';
-                    const height = element.scrollHeight;
-                    element.style.height = '0';
-                    element.style.overflow = 'hidden';
-                    requestAnimationFrame(() => {
-                        element.style.transition = `height ${duration}ms ease-out`;
-                        element.style.height = `${height}px`;
-                    });
-                    setTimeout(() => {
-                        element.style.height = null; // Clear inline styles
-                    }, duration);
-                }
-
-                // TOC toggle logic
-                toggleBtn.addEventListener("click", function () {
-                    const tocContainer = document.querySelector(`ul.${prefix}-list`);
-                    if (tocContainer.style.display === "none" || tocContainer.offsetHeight === 0) {
-                        this.textContent = this.getAttribute("data-hide-text");
-                        <?php echo $this->prefix; ?>slideDown(tocContainer, 300);
-                    } else {
-                        <?php echo $this->prefix; ?>slideUp(tocContainer, 300);
-                        this.textContent = this.getAttribute("data-show-text");
-                    }
-                });
             });
         </script>
         <?php
+    }
+
+    private function getPrefix($suffix = '') {
+        return $this->prefix ? $this->prefix . '-' . $suffix : $suffix;
+    }
+
+    public function addHeadingIds($content) {
+        // Add heading IDs only if not already present
+        $pattern = '/<h([1-6])[^>]*?>(?:\s*<[^>]+>)*([^<]+)(?:<\/[^>]+>)*\s*<\/h\1>/i';
+        return preg_replace_callback($pattern, function($match) {
+            $level = $match[1];
+            $title = trim(strip_tags($match[2]));
+            $anchor = sanitize_title($title);
+            
+            // Only add ID if it doesn't exist
+            if (strpos($match[0], 'id="') === false) {
+                return sprintf('<h%d id="%s">%s</h%d>', $level, $anchor, $title, $level);
+            }
+            return $match[0];
+        }, $content);
     }
 }
 
